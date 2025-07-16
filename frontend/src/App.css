@@ -1,0 +1,46 @@
+/* ---------- general ---------- */
+.app { max-width: 1280px; margin: 0 auto; padding: 16px; font-family: system-ui, sans-serif; }
+
+/* ---------- drop zone ---------- */
+.dropzone { border: 2px dashed #666; border-radius: 8px; padding: 24px; text-align: center; cursor: pointer; transition: background .15s; }
+.dropzone:hover { background: rgba(0,0,0,.04); }
+.dropzone.has-file { border-style: solid; }
+.dropzone small { display: block; margin-top: 8px; color: #777; }
+
+/* ---------- grid ---------- */
+.grid { display: grid; grid-template-columns: 1fr 340px; gap: 24px; margin-top: 24px; align-items: start; }
+@media (max-width: 900px) { .grid { grid-template-columns: 1fr; } }
+
+/* ---------- video ---------- */
+.video-wrap { width: 100%; }
+.video { width: 100%; max-width: 800px; max-height: 60vh; object-fit: contain; border-radius: 6px; box-shadow: 0 2px 6px rgba(0,0,0,.15); }
+
+/* annotation bar */
+.annot-bar { position: relative; height: 8px; background: #e5e5e5; border-radius: 4px; margin-top: 6px; }
+.marker { position: absolute; top: 0; width: 4px; height: 100%; }
+.marker-s { background: #32c432; }     /* green */
+.marker-e { background: #e94141; }     /* red */
+.marker-t { background: #3389ff; }     /* blue */
+
+.time { margin-top: 4px; }
+
+/* ---------- side ---------- */
+.side { display: flex; flex-direction: column; }
+.fm { margin-bottom: 12px; }
+.fm input { width: 200px; }
+.buttons { margin-bottom: 12px; }
+.buttons button:first-child { margin-right: 8px; }
+
+/* ---------- table ---------- */
+.table-wrap { flex: 1; overflow-y: auto; max-height: 50vh; }
+table { width: 100%; border-collapse: collapse; font-size: 14px; }
+th, td { padding: 4px 6px; border-bottom: 1px solid #ddd; }
+th { background: #f6f6f6; }
+td:last-child { width: 1%; }
+table button { cursor: pointer; background: none; border: none; font-size: 16px; }
+
+/* ---------- help ---------- */
+.help { margin-top: 16px; font-size: 12px; color: #666; }
+
+/* overlap warning */
+.warning { color: #d9534f; font-weight: 600; margin-bottom: 8px; }
