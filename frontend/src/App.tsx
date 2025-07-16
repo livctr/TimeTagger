@@ -25,6 +25,8 @@ const App: React.FC = () => {
   const [now,      setNow]      = useState(0);
   const [clipActive, setClipActive] = useState(false);
   const [annotations, setAnnotations] = useState<Annotation[]>([]);
+  const [editRow, setEditRow]     = useState<number>(-1);
+  const [editText, setEditText]   = useState<string>('');
 
   /* ───────── derived flags ──────── */
   const unequalStartsEnds = useMemo(() => {
@@ -88,11 +90,19 @@ const App: React.FC = () => {
         return;
       }
 
+      /* undo */
+      if (e.key === 'z' && e.ctrlKey) {
+        e.preventDefault();
+        undo();
+        return;
+      }
+
       /* ignore other keys while typing in FM */
       if (inInput) return;
       if (!['s', 'e', 't'].includes(e.key)) return;
 
       if (!fmItem) {
+        vid.pause();
         alert('Please enter a label for the FM item');
         return;
       }
@@ -119,6 +129,15 @@ const App: React.FC = () => {
       alert(`Unsupported: ${f.type || f.name}`);
       return;
     }
+
+    /* warn if we’d lose work */
+    if (annotations.length) {
+      const ok = window.confirm(
+        'Switching videos will discard the current annotations. Continue?'
+      );
+      if (!ok) return;            // user canceled
+    }
+    
     setFile(f);
     setAnnotations([]);
     setClipActive(false);
@@ -130,6 +149,15 @@ const App: React.FC = () => {
   /* ───────── annotation utils ───── */
   const removeAnn = (i: number) => setAnnotations(a => a.filter((_, ix) => ix !== i));
   const undo      = () => setAnnotations(a => a.slice(0, -1));
+
+  const commitEdit = () => {
+    if (editRow === -1) return;
+    setAnnotations(a => a.map((ann, idx) =>
+      idx === editRow ? { ...ann, fmItem: editText } : ann
+    ));
+    setEditRow(-1);
+    setEditText('');
+  };
 
   /* ───────── save (unchanged) ───── */
   const save = async () => {
@@ -253,7 +281,31 @@ const App: React.FC = () => {
                   <td>{i + 1}</td>
                   <td>{a.type}</td>
                   <td>{a.time.toFixed(2)}</td>
-                  <td>{a.fmItem}</td>
+                  <td>
+                    {editRow === i ? (
+                      /* — editing mode — */
+                      <input
+                        autoFocus
+                        value={editText}
+                        onChange={e => setEditText(e.target.value)}
+                        onBlur={commitEdit}
+                        onKeyDown={e => {
+                          if (e.key === 'Enter') commitEdit();
+                          if (e.key === 'Escape') { setEditRow(-1); setEditText(''); }
+                        }}
+                        style={{ width: '100%' }}
+                      />
+                    ) : (
+                      /* — read‑only mode — */
+                      <span
+                        className="editable"
+                        onClick={() => { setEditRow(i); setEditText(a.fmItem); }}
+                        title="Click to edit"
+                      >
+                        {a.fmItem || <em style={{ color: '#888' }}>(empty)</em>}
+                      </span>
+                    )}
+                  </td>
                   <td><button onClick={() => removeAnn(i)}>×</button></td>
                 </tr>
               ))}
