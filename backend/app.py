@@ -84,4 +84,4 @@ def save_annotations():
 # ─── Entrypoint ───────────────────────────────────────────────────────
 if __name__ == "__main__":
     # Use `host='0.0.0.0'` for Docker / LAN access if needed
-    app.run(debug=True, port=9172)
+    app.run(debug=True, port=5172)
