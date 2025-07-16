@@ -3,8 +3,8 @@ import { defineConfig } from 'vite';
 
 export default defineConfig({
   server: {
-    watch: {
-      usePolling: true, // Enable polling for file changes
-    },
+    // watch: {
+    //   usePolling: true, // Enable polling for file changes
+    // },
   },
 });

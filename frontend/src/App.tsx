@@ -92,6 +92,11 @@ const App: React.FC = () => {
       if (inInput) return;
       if (!['s', 'e', 't'].includes(e.key)) return;
 
+      if (!fmItem) {
+        alert('Please enter a label for the FM item');
+        return;
+      }
+
       const t = vid.currentTime;
       setAnnotations(prev => [
         ...prev,
