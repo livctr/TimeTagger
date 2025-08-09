@@ -1,331 +1,598 @@
-import React, {
-  useState,
-  useRef,
-  useEffect,
-  useMemo,
-  DragEvent,
-  ChangeEvent,
-} from 'react';
-import './App.css';
+// App.tsx
+import React, { useEffect, useMemo, useRef, useState, ChangeEvent, DragEvent } from "react";
+import "./App.css";
 
-type AnnType = 's' | 'e' | 't';
-interface Annotation { type: AnnType; time: number; fmItem: string; }
+/*
+  Video Annotator – reorganized layout (augmented)
 
-const SUPPORTED_MIME = ['video/mp4', 'video/webm', 'video/ogg'];
-const SEEK_DELTA = 0.1;               // seconds ⬅ / ➡ jump
+  Columns:
+  1) Left: Folder drop + "Videos in folder" list
+  2) Middle: Hotkeys blurb + FM input + Save/Undo + FM list (numbers→names)
+  3) Right: Video player + timeline (top) and scrollable annotation table (bottom)
 
-const App: React.FC = () => {
-  /* ───────── refs & state ───────── */
+  Updates per request:
+  - CSV basename = the **video folder name** (derived from webkitRelativePath when available).
+  - Each annotation stores the **video** it belongs to; table shows Video column; CSV includes it.
+  - Switching videos **does not clear** existing annotations; further annotations use the new video name.
+  - Removed the L/R "Sides checklist" panel.
+  - Warn if typed FM label is not in the predefined list (confirm before adding).
+*/
+
+type AnnType = "s" | "e" | "t";
+interface Annotation { type: AnnType; time: number; fmItem: string; video: string; }
+interface ClipPair { s: Annotation; e: Annotation; }
+
+const SEEK_DELTA = 0.1;
+const fmt = (t: number) => t.toFixed(3);
+const canonicalFmBase = (s: string) => s.trim().replace(/_/g, "-");
+const isMp4 = (name: string) => name.toLowerCase().endsWith(".mp4");
+
+export default function App() {
   const videoRef = useRef<HTMLVideoElement | null>(null);
-  const fmRef    = useRef<HTMLInputElement | null>(null);
+  const fmRef = useRef<HTMLInputElement | null>(null);
 
-  const [file,  setFile]        = useState<File | null>(null);
+  // Folder videos & selection
+  const [folderFiles, setFolderFiles] = useState<File[]>([]);
+  const [selected, setSelected] = useState<File | null>(null);
+  const [folderBase, setFolderBase] = useState<string>("annotations");
+
+  // Playback / timeline
   const [duration, setDuration] = useState(0);
-  const [fmItem,   setFmItem]   = useState('');
-  const [now,      setNow]      = useState(0);
-  const [clipActive, setClipActive] = useState(false);
-  const [annotations, setAnnotations] = useState<Annotation[]>([]);
-  const [editRow, setEditRow]     = useState<number>(-1);
-  const [editText, setEditText]   = useState<string>('');
+  const [now, setNow] = useState(0);
 
-  /* ───────── derived flags ──────── */
+  // Annotations
+  const [fmItem, setFmItem] = useState("");
+  const [annotations, setAnnotations] = useState<Annotation[]>([]);
+  const [editIx, setEditIx] = useState<number>(-1);
+  const [editText, setEditText] = useState("");
+
+  // FM list (numbers + names) loaded from /fm_list.txt
+  const [fmRequiredBase, setFmRequiredBase] = useState<string[]>([]);
+  const [fmNameMap, setFmNameMap] = useState<Record<string, string>>({});
+  const fmRequiredWithSides = useMemo(() => {
+    const out: string[] = [];
+    fmRequiredBase.forEach((b) => { out.push(`${b}L`); out.push(`${b}R`); });
+    return out;
+  }, [fmRequiredBase]);
+
+  const [fmListStatus, setFmListStatus] = useState<"idle"|"loading"|"ok"|"error">("idle");
+  const FM_TXT_PATH = "/fm_list.txt";
+
+  function parseFmList(text: string) {
+    const bases: string[] = [];
+    const names: Record<string, string> = {};
+    const lines = text.split(/\r?\n|\//); // allow slash-separated groups
+    for (const raw of lines) {
+      const line = raw.trim();
+      if (!line) continue;
+      const parts = line.split(/[\t,|]+/);
+      const baseRaw = (parts[0] ?? "").trim();
+      if (!baseRaw) continue;
+      const base = canonicalFmBase(baseRaw);
+      const name = (parts.slice(1).join(" ").trim()) || base;
+      if (!names[base]) bases.push(base);
+      names[base] = name;
+    }
+    return { bases: Array.from(new Set(bases)), names };
+  }
+
+  const loadFmList = async () => {
+    try {
+      setFmListStatus("loading");
+      const res = await fetch(FM_TXT_PATH, { cache: "no-store" });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const text = await res.text();
+      const { bases, names } = parseFmList(text);
+      setFmRequiredBase(bases);
+      setFmNameMap(names);
+      setFmListStatus("ok");
+    } catch (e) {
+      console.error(e);
+      setFmRequiredBase([]);
+      setFmNameMap({});
+      setFmListStatus("error");
+    }
+  };
+  useEffect(() => { loadFmList(); }, []);
+
+  // Derived for CURRENT video only
+  const currentVideoName = selected?.name || "";
+
+  const clipOpen = useMemo(() => {
+    if (!currentVideoName) return false;
+    const seq = annotations
+      .filter(a => a.video === currentVideoName && a.type !== "t")
+      .sort((a, b) => a.time - b.time);
+    let open = false;
+    for (const a of seq) {
+      if (a.type === "s") { if (open) return true; open = true; }
+      else if (a.type === "e") { if (!open) return false; open = false; }
+    }
+    return open;
+  }, [annotations, currentVideoName]);
+
+  const clipPairs: ClipPair[] = useMemo(() => {
+    if (!currentVideoName) return [];
+    const seq = annotations
+      .filter(a => a.video === currentVideoName && a.type !== "t")
+      .slice()
+      .sort((a, b) => a.time - b.time);
+    const out: ClipPair[] = [];
+    let lastS: Annotation | null = null;
+    for (const a of seq) {
+      if (a.type === "s") lastS = a;
+      else if (a.type === "e" && lastS) { out.push({ s: lastS, e: a }); lastS = null; }
+    }
+    return out;
+  }, [annotations, currentVideoName]);
+
   const unequalStartsEnds = useMemo(() => {
-    const numStarts = annotations.filter(a => a.type === 's').length;
-    const numEnds   = annotations.filter(a => a.type === 'e').length;
-    return numStarts !== numEnds;
-  }, [annotations]);
+    if (!currentVideoName) return false;
+    const ns = annotations.filter(a => a.video === currentVideoName && a.type === "s").length;
+    const ne = annotations.filter(a => a.video === currentVideoName && a.type === "e").length;
+    return ns !== ne;
+  }, [annotations, currentVideoName]);
 
   const hasOverlap = useMemo(() => {
-    const seq = annotations
-      .filter(a => a.type !== 't')
-      .sort((a, b) => a.time - b.time);
-
-    for (let i = 0; i < seq.length; i += 2) {
-      if ((i + 1 >= seq.length) || seq[i].type !== 's' || seq[i + 1].type !== 'e')
-        return true;               // odd count or mismatched pair  → overlap flag
+    const pairs = clipPairs.filter(p => p.s.fmItem === p.e.fmItem);
+    for (let i = 0; i < pairs.length; i++) {
+      const a = pairs[i];
+      if (a.s.time >= a.e.time) return true;
+      for (let j = i + 1; j < pairs.length; j++) {
+        const b = pairs[j];
+        if (b.s.fmItem !== a.s.fmItem) continue;
+        const overlap = Math.max(a.s.time, b.s.time) < Math.min(a.e.time, b.e.time);
+        if (overlap) return true;
+      }
     }
     return false;
-  }, [annotations]);
+  }, [clipPairs]);
 
-  /* ───────── object URL ─────────── */
-  const videoURL = useMemo(() => (file ? URL.createObjectURL(file) : ''), [file]);
+  // Completion map: base -> { L: boolean, R: boolean }
+  const completion = useMemo(() => {
+    const hasAtLeastOnePair = (label: string) => {
+      // Count a completed s..e range per *video*. If any video has one, it's considered completed.
+      const byVideo = new Map<string, Annotation[]>();
+      annotations
+        .filter(a => a.fmItem === label && a.type !== "t")
+        .forEach(a => {
+          const arr = byVideo.get(a.video) ?? [];
+          arr.push(a);
+          byVideo.set(a.video, arr);
+        });
+
+      for (const arr of byVideo.values()) {
+        arr.sort((a, b) => a.time - b.time);
+        let open = false;
+        for (const a of arr) {
+          if (a.type === "s") open = true;
+          else if (a.type === "e" && open) return true; // found one s..e
+        }
+      }
+      return false;
+    };
+
+    const baseMap: Record<string, { L: boolean; R: boolean }> = {};
+    for (const b of fmRequiredBase) {
+      baseMap[b] = {
+        L: hasAtLeastOnePair(`${b}L`),
+        R: hasAtLeastOnePair(`${b}R`),
+      };
+    }
+    return baseMap;
+  }, [annotations, fmRequiredBase]);
+
+  // Video URL
+  const videoURL = useMemo(() => (selected ? URL.createObjectURL(selected) : ""), [selected]);
   useEffect(() => () => { if (videoURL) URL.revokeObjectURL(videoURL); }, [videoURL]);
 
-  /* ───────── video events ───────── */
+  // Events
   const onLoaded = () => setDuration(videoRef.current?.duration || 0);
   const onTime   = () => setNow(videoRef.current?.currentTime || 0);
 
-  /* ───────── global hot‑keys ────── */
+  // Global hotkeys (operate on current video only)
   useEffect(() => {
-    const key = (e: KeyboardEvent) => {
+    const handler = (e: KeyboardEvent) => {
       const tag = (e.target as HTMLElement).tagName.toLowerCase();
-      const inInput = tag === 'input' || tag === 'textarea';
+      const inInput = tag === "input" || tag === "textarea";
       const vid = videoRef.current;
 
-      /* f = focus FM input (unless already typing there) */
-      if (e.key === 'f' && !inInput) {
-        e.preventDefault();
-        fmRef.current?.focus();
-        return;
-      }
-      /* exit FM input on Esc */
-      if (e.key === 'Escape' && inInput) {
-        (e.target as HTMLElement).blur();
-        return;
-      }
-      if (!vid || !file) return;
+      if (e.key === "f" && !inInput) { e.preventDefault(); fmRef.current?.focus(); return; }
+      if (e.key === "Escape" && inInput) { (e.target as HTMLElement).blur(); return; }
+      if (!vid || !selected) return;
 
-      /* play / pause */
-      if (e.key === ' ') {
+      if (e.key === " ") { e.preventDefault(); vid.paused ? vid.play() : vid.pause(); return; }
+      if (e.key === "ArrowLeft" || e.key === "ArrowRight") {
         e.preventDefault();
-        vid.paused ? vid.play() : vid.pause();
+        const d = e.key === "ArrowLeft" ? -SEEK_DELTA : SEEK_DELTA;
+        vid.currentTime = Math.min(Math.max(0, vid.currentTime + d), vid.duration);
         return;
       }
+      if (e.key === "z" && e.ctrlKey) { e.preventDefault(); undo(); return; }
 
-      /* ← / → seek */
-      if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') {
-        e.preventDefault();
-        const delta = e.key === 'ArrowLeft' ? -SEEK_DELTA : SEEK_DELTA;
-        vid.currentTime = Math.min(Math.max(0, vid.currentTime + delta), vid.duration);
-        return;
-      }
-
-      /* undo */
-      if (e.key === 'z' && e.ctrlKey) {
-        e.preventDefault();
-        undo();
-        return;
-      }
-
-      /* ignore other keys while typing in FM */
       if (inInput) return;
-      if (!['s', 'e', 't'].includes(e.key)) return;
+      if (!["s", "e", "t"].includes(e.key)) return;
 
-      if (!fmItem) {
+      // Validate FM label against predefined list; warn (confirm) if not found
+      const isPredefined = fmRequiredWithSides.length === 0 || fmRequiredWithSides.includes(fmItem);
+      if (!fmItem) { vid.pause(); alert("Enter an FM label (e.g., 12L, 3-8R) before annotating."); return; }
+      if (!isPredefined) {
         vid.pause();
-        alert('Please enter a label for the FM item');
-        return;
+        const cont = window.confirm(`${fmItem} is not in the predefined list. Continue anyway?`);
+        if (!cont) return;
       }
 
       const t = vid.currentTime;
-      setAnnotations(prev => [
-        ...prev,
-        { type: e.key as AnnType, time: t, fmItem },
-      ]);
+      const videoName = selected.name;
 
-      if (e.key === 's') setClipActive(true);
-      if (e.key === 'e') setClipActive(false);
+      if (e.key === "s") {
+        if (hasOpenForLabel(fmItem, videoName)) { alert(`Open start exists for ${fmItem} in this video. Press 'e' to close it.`); return; }
+        setAnnotations(prev => insertChronologically(prev, { type: "s", time: t, fmItem, video: videoName }));
+        return;
+      }
+      if (e.key === "e") {
+        const openIdx = indexOfLastOpenStart(fmItem, videoName);
+        if (openIdx === -1) { alert(`No open start for ${fmItem} in this video. Press 's' first.`); return; }
+        const lastStart = annotations[openIdx];
+        if (t <= lastStart.time) { alert("End must be after start."); return; }
+        const wouldOverlap = clipPairs
+          .filter(p => p.s.fmItem === fmItem)
+          .some(p => Math.max(p.s.time, lastStart.time) < Math.min(p.e.time, t));
+        if (wouldOverlap) { alert("This clip overlaps an existing clip for the same FM label."); return; }
+        setAnnotations(prev => insertChronologically(prev, { type: "e", time: t, fmItem, video: videoName }));
+        return;
+      }
+      if (e.key === "t") {
+        setAnnotations(prev => insertChronologically(prev, { type: "t", time: t, fmItem, video: videoName }));
+        return;
+      }
     };
+    window.addEventListener("keydown", handler);
+    return () => window.removeEventListener("keydown", handler);
+  }, [fmItem, selected, annotations, clipPairs, fmRequiredWithSides]);
 
-    window.addEventListener('keydown', key);
-    return () => window.removeEventListener('keydown', key);
-  }, [fmItem, file]);
-
-  /* ───────── file choose / drop ─── */
-  const takeFiles = (fs: FileList | null) => {
-    if (!fs?.length) return;
-    const f = fs[0];
-    if (!SUPPORTED_MIME.includes(f.type)) {
-      alert(`Unsupported: ${f.type || f.name}`);
-      return;
-    }
-
-    /* warn if we’d lose work */
-    if (annotations.length) {
-      const ok = window.confirm(
-        'Switching videos will discard the current annotations. Continue?'
-      );
-      if (!ok) return;            // user canceled
-    }
-    
-    setFile(f);
-    setAnnotations([]);
-    setClipActive(false);
-    setDuration(0);
+  // Helpers (per video)
+  const hasOpenForLabel = (label: string, videoName: string) => {
+    const seq = annotations
+      .filter(a => a.video === videoName && a.fmItem === label && a.type !== "t")
+      .sort((a, b) => a.time - b.time);
+    let open = false;
+    for (const a of seq) { if (a.type === "s") open = true; else if (a.type === "e") open = false; }
+    return open;
   };
-  const drop   = (e: DragEvent<HTMLDivElement>) => { e.preventDefault(); takeFiles(e.dataTransfer.files); };
-  const choose = (e: ChangeEvent<HTMLInputElement>) => takeFiles(e.target.files);
 
-  /* ───────── annotation utils ───── */
+  const indexOfLastOpenStart = (label: string, videoName: string) => {
+    let openIdx = -1;
+    annotations.forEach((a, i) => {
+      if (a.video === videoName && a.fmItem === label) {
+        if (a.type === "s") openIdx = i;
+        if (a.type === "e") openIdx = -1;
+      }
+    });
+    return openIdx;
+  };
+
+  const insertChronologically = (prev: Annotation[], a: Annotation) =>
+    [...prev, a].sort((x, y) => x.time - y.time);
+
+  // Folder intake
+  const deriveFolderBase = (files: File[]) => {
+    // Try to infer the top-level folder from webkitRelativePath; fallback to "annotations"
+    const withRel = files.find(f => (f as any).webkitRelativePath);
+    if (withRel) {
+      const rel: string = (withRel as any).webkitRelativePath as string; // e.g. "MyFolder/video1.mp4"
+      const top = rel.split("/")[0] || "annotations";
+      return top;
+    }
+    return "annotations";
+  };
+
+  const takeFolderFiles = (fs: FileList | null) => {
+    if (!fs?.length) return;
+    const vids = Array.from(fs).filter(f => isMp4(f.name));
+    vids.sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true }));
+    setFolderFiles(vids);
+    setFolderBase(deriveFolderBase(vids));
+    if (vids.length) maybeSwitchVideo(vids[0]);
+  };
+  const dropFolder = (e: DragEvent<HTMLDivElement>) => { e.preventDefault(); takeFolderFiles(e.dataTransfer.files); };
+  const chooseFolder = (e: ChangeEvent<HTMLInputElement>) => takeFolderFiles(e.target.files);
+
+  const maybeSwitchVideo = (f: File) => {
+    if (selected?.name === f.name) return;
+    setSelected(f);
+    setDuration(0);
+    setNow(0);
+  };
+
   const removeAnn = (i: number) => setAnnotations(a => a.filter((_, ix) => ix !== i));
-  const undo      = () => setAnnotations(a => a.slice(0, -1));
+  const undo = () => setAnnotations(a => a.slice(0, -1));
 
   const commitEdit = () => {
-    if (editRow === -1) return;
-    setAnnotations(a => a.map((ann, idx) =>
-      idx === editRow ? { ...ann, fmItem: editText } : ann
-    ));
-    setEditRow(-1);
-    setEditText('');
+    if (editIx === -1) return;
+    setAnnotations(a => a.map((ann, idx) => (idx === editIx ? { ...ann, fmItem: canonicalFmBase(editText) } : ann)));
+    setEditIx(-1); setEditText("");
   };
 
-  /* ───────── save (unchanged) ───── */
-  const save = async () => {
-    if (!file) return;
+  // Save to CSV
+  const saveCsv = async () => {
+    if (!selected && folderFiles.length === 0) return;
 
-    let final = annotations;
-    if (clipActive && videoRef.current) {
-      final = [...final, { type: 'e', time: videoRef.current.duration, fmItem }];
-      setClipActive(false);
+    if (clipOpen) {
+      const proceed = window.confirm("An open start has no end. Close it at video end time?");
+      if (!proceed) return;
+      if (videoRef.current && currentVideoName) {
+        const t = videoRef.current.duration;
+        openLabels(currentVideoName).forEach(label => {
+          setAnnotations(prev => insertChronologically(prev, { type: "e", time: t, fmItem: label, video: currentVideoName }));
+        });
+      }
     }
-    final.sort((a, b) => a.time - b.time);
 
-    try {
-      await fetch('http://localhost:5172/api/annotations', {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ video_path: file.name, annotations: final }),
+    const present = new Set(annotations.map(a => canonicalFmBase(a.fmItem)));
+    const missing = fmRequiredWithSides.filter(req => !present.has(canonicalFmBase(req)));
+
+    if (fmRequiredWithSides.length > 0 && missing.length > 0) {
+      const ok = window.confirm(
+        `The following FM items are missing (need both L and R):\n\n${missing.join(", ")}\n\nProceed anyway?`
+      );
+      if (!ok) return;
+    }
+
+    // --- New semicolon-delimited CSV format ---
+    const fmt2 = (t: number) => t.toFixed(2);
+
+    // Group annotations by (video, fmItem), ignoring "t" marks
+    const byVideoAndFm = new Map<string, Map<string, Annotation[]>>();
+    annotations
+      .filter(a => a.type !== "t")
+      .forEach(a => {
+        const byFm = byVideoAndFm.get(a.video) ?? new Map<string, Annotation[]>();
+        const arr = byFm.get(a.fmItem) ?? [];
+        arr.push(a);
+        byFm.set(a.fmItem, arr);
+        byVideoAndFm.set(a.video, byFm);
       });
-      alert('saved!');
-      setAnnotations([]);
-    } catch {
-      alert('save failed');
+
+    // Build CSV lines
+    const lines: string[] = [];
+    lines.push("video_path;fm_item;times");
+
+    const sortedVideos = Array.from(byVideoAndFm.keys())
+      .sort((a, b) => a.localeCompare(b, undefined, { numeric: true }));
+
+    for (const video of sortedVideos) {
+      const byFm = byVideoAndFm.get(video)!;
+      const sortedFms = Array.from(byFm.keys())
+        .sort((a, b) => a.localeCompare(b, undefined, { numeric: true }));
+
+      for (const fm of sortedFms) {
+        const seq = byFm.get(fm)!.slice().sort((a, b) => a.time - b.time);
+
+        const pairs: string[] = [];
+        let openS: Annotation | null = null;
+        for (const a of seq) {
+          if (a.type === "s") {
+            openS = a;
+          } else if (a.type === "e" && openS) {
+            pairs.push(`s:${fmt2(openS.time)},e:${fmt2(a.time)}`);
+            openS = null;
+          }
+        }
+
+        if (pairs.length > 0) {
+          lines.push(`${video};${fm};${pairs.join(",")}`);
+        }
+      }
     }
+
+    const csv = lines.join("\n");
+    const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
+    const url  = URL.createObjectURL(blob);
+    const aTag = document.createElement("a");
+    const base = folderBase || "annotations";
+    aTag.href = url;
+    aTag.download = `${base}_annotations.csv`;
+    aTag.click();
+    URL.revokeObjectURL(url);
   };
 
-  /* ───────── UI ─────────────────── */
+  const openLabels = (videoName: string) => {
+    const map: Record<string, number> = {};
+    annotations.filter(a => a.video === videoName && a.type !== "t").forEach(a => {
+      const k = a.fmItem; map[k] = (map[k] ?? 0) + (a.type === "s" ? 1 : -1);
+    });
+    return Object.keys(map).filter(k => map[k] === 1);
+  };
+
+  // UI
   return (
-    <div className="app">
+    <div className="app grid-3">
+      {/* Left column: folder + video list */}
+      <div className="col left">
+        <h2 className="title">Video Temporal Annotator</h2>
 
-      {/* ─ Column 1 · controls ─ */}
-      <div className="col1">
-        <h2>Video Temporal Annotator</h2>
-
-        <p className="help">
-          Hotkeys:&nbsp;
-          <strong>Space</strong>=play/pause,&nbsp;
-          <strong>s</strong>=start,&nbsp;<strong>e</strong>=end,&nbsp;
-          <strong>t</strong>=key frame,&nbsp;
-          <strong>←</strong>/<strong>→</strong>=±0.1 s,&nbsp;
-          <strong>f</strong>=focus FM,&nbsp;<strong>Esc</strong>=leave FM
-        </p>
-
-        {/* file dropper */}
         <div
-          className={`dropzone ${file ? 'has-file' : ''}`}
-          onDragOver={e => e.preventDefault()}
-          onDrop={drop}
-          onClick={() => document.getElementById('fileInput')?.click()}
+          className="card dropzone"
+          onDragOver={(e) => e.preventDefault()}
+          onDrop={dropFolder}
+          onClick={() => document.getElementById("folderInput")?.click()}
+          title="Drag a folder or click to choose"
         >
-          {file ? <strong>{file.name}</strong> : (
-            <>
-              <p>Drag &amp; drop a video or click to choose</p>
-              <small>MP4 (H.264), WebM, Ogg/Theora</small>
-            </>
-          )}
+          <div className="card-title">Folder of videos</div>
+          <div className="muted">Drop a folder or click to select. Only <code>.mp4</code> are listed.</div>
           <input
-            id="fileInput"
+            id="folderInput"
             type="file"
-            accept={SUPPORTED_MIME.join(',')}
+            // @ts-ignore non-standard but supported in Chromium
+            webkitdirectory=""
+            multiple
+            accept="video/mp4"
             hidden
-            onChange={choose}
+            onChange={chooseFolder}
           />
         </div>
 
-        {/* FM item + Save / Undo */}
-        <label className="fm">
-          FM item:&nbsp;
-          <input
-            ref={fmRef}
-            type="text"
-            value={fmItem}
-            onChange={e => setFmItem(e.target.value)}
-            placeholder="label"
-          />
-        </label>
-
-        <div className="buttons">
-          <button onClick={save} disabled={!file}>Save</button>
-          <button onClick={undo} disabled={!annotations.length}>Undo</button>
-        </div>
-      </div>
-
-      {/* ─ Column 2 · video ─ */}
-      <div className="col2">
-        {file && (
-          <div className="video-wrap">
-            <video
-              ref={videoRef}
-              className="video"
-              src={videoURL}
-              controls
-              onLoadedMetadata={onLoaded}
-              onTimeUpdate={onTime}
-            />
-            {duration > 0 && (
-              <div className="annot-bar">
-                {annotations.map((a, i) => (
-                  <div
-                    key={i}
-                    className={`marker marker-${a.type}`}
-                    style={{ left: `${(a.time / duration) * 100}%` }}
-                    title={`${a.type}@${a.time.toFixed(2)}`}
-                  />
-                ))}
-              </div>
+        <div className="card">
+          <div className="card-title">Videos in folder</div>
+          <div className="video-list">
+            {folderFiles.length === 0 ? (
+              <div className="muted">No videos loaded yet.</div>
+            ) : (
+              folderFiles.map(f => (
+                <button
+                  key={f.name}
+                  className={`video-item ${selected?.name === f.name ? "active" : ""}`}
+                  onClick={() => maybeSwitchVideo(f)}
+                  title={f.name}
+                >
+                  {f.name}
+                </button>
+              ))
             )}
-            <div className="time">Current time: {now.toFixed(2)} s</div>
           </div>
-        )}
+        </div>
       </div>
 
-      {/* ─ Column 3 · table / warnings ─ */}
-      <div className="col3">
-        <div className="table-wrap">
+      {/* Middle column: controls */}
+      <div className="col middle">
+        <div className="card">
+          <div className="card-title">Hotkeys</div>
+          <p className="muted small">
+            <strong>Space</strong> play/pause • <strong>s</strong> start • <strong>e</strong> end • <strong>t</strong> keyframe •
+            ←/→ ±0.1s • <strong>f</strong> focus FM • Esc blur
+          </p>
+        </div>
+
+        <div className="card">
+          <div className="row">
+            <label className="label">FM:&nbsp;
+              <input
+                ref={fmRef}
+                className="input"
+                type="text"
+                value={fmItem}
+                onChange={(e) => setFmItem(canonicalFmBase(e.target.value))}
+                placeholder="e.g. 12L or 3-8R"
+              />
+            </label>
+            <button className="btn primary" onClick={saveCsv} disabled={!folderFiles.length}>Save CSV</button>
+            <button className="btn" onClick={undo} disabled={annotations.length === 0}>Undo</button>
+          </div>
+        </div>
+
+        <div className="card">
+          <div className="card-title">FM list</div>
+          <div className="muted small">Source: <code>/fm_list.txt</code></div>
+          <div className={`status ${fmListStatus}`}>
+            {fmListStatus === "loading" && "Loading…"}
+            {fmListStatus === "ok" && `Loaded ${fmRequiredBase.length} base item(s).`}
+            {fmListStatus === "error" && "Failed to load. Check the file exists."}
+          </div>
+          <div className="actions"><button className="btn" onClick={loadFmList}>Reload</button></div>
+
+          {fmRequiredBase.length > 0 && (
+            <div className="fm-map">
+              <div className="fm-map-title">Numbers → Names</div>
+                <div className="fm-map-list">
+                  {fmRequiredBase.map((b) => {
+                    const bothSides = (completion[b]?.L && completion[b]?.R) ?? false;
+                    return (
+                      <div className={`fm-row ${bothSides ? "done" : ""}`} key={b} title={fmNameMap[b] || b}>
+                        <code className="fm-code">{b}</code>
+                        <span className="fm-name">— {fmNameMap[b] || b}</span>
+                      </div>
+                    );
+                  })}
+                </div>
+            </div>
+          )}
+        </div>
+      </div>
+
+      {/* Right column: video + scrollable table */}
+      <div className="col right">
+        <div className="video-wrap card">
+          <video
+            ref={videoRef}
+            src={videoURL}
+            className="video"
+            controls
+            onLoadedMetadata={onLoaded}
+            onTimeUpdate={onTime}
+          />
+          {duration > 0 && (
+            <div className="annot-bar">
+              {clipPairs.map((p, idx) => (
+                <div
+                  key={`pair-${idx}-${p.s.time}-${p.e.time}`}
+                  className="range"
+                  style={{ left: `${(p.s.time / duration) * 100}%`, width: `${((p.e.time - p.s.time) / duration) * 100}%` }}
+                  title={`${p.s.fmItem}: ${fmt(p.s.time)}–${fmt(p.e.time)}`}
+                />
+              ))}
+              {annotations.filter(a => a.video === currentVideoName && a.type === "t").map((a, i) => (
+                <div
+                  key={`t-${i}-${a.time}`}
+                  className="tmark"
+                  style={{ left: `${(a.time / duration) * 100}%` }}
+                  title={`t@${fmt(a.time)} (${a.fmItem})`}
+                />
+              ))}
+            </div>
+          )}
+          <div className="time">Current time: {fmt(now)} s</div>
+        </div>
+
+        <div className="table card scrollable">
           <table>
             <thead>
-              <tr><th>#</th><th>Type</th><th>Time (s)</th><th>FM</th><th/></tr>
+              <tr>
+                <th>#</th><th>Video</th><th>Type</th><th>Time (s)</th><th>FM</th><th />
+              </tr>
             </thead>
             <tbody>
               {annotations.map((a, i) => (
-                <tr key={`${a.time}-${i}`}>
+                <tr key={`${a.video}-${a.time}-${i}`}>
                   <td>{i + 1}</td>
+                  <td title={a.video}>{a.video}</td>
                   <td>{a.type}</td>
-                  <td>{a.time.toFixed(2)}</td>
+                  <td>{fmt(a.time)}</td>
                   <td>
-                    {editRow === i ? (
-                      /* — editing mode — */
+                    {editIx === i ? (
                       <input
                         autoFocus
+                        className="input"
                         value={editText}
-                        onChange={e => setEditText(e.target.value)}
+                        onChange={(e) => setEditText(canonicalFmBase(e.target.value))}
                         onBlur={commitEdit}
-                        onKeyDown={e => {
-                          if (e.key === 'Enter') commitEdit();
-                          if (e.key === 'Escape') { setEditRow(-1); setEditText(''); }
-                        }}
-                        style={{ width: '100%' }}
+                        onKeyDown={(e) => { if (e.key === "Enter") commitEdit(); if (e.key === "Escape") { setEditIx(-1); setEditText(""); } }}
                       />
                     ) : (
-                      /* — read‑only mode — */
                       <span
                         className="editable"
-                        onClick={() => { setEditRow(i); setEditText(a.fmItem); }}
+                        onClick={() => { setEditIx(i); setEditText(a.fmItem); }}
                         title="Click to edit"
                       >
-                        {a.fmItem || <em style={{ color: '#888' }}>(empty)</em>}
+                        {a.fmItem || <em className="placeholder">(empty)</em>}
                       </span>
                     )}
                   </td>
-                  <td><button onClick={() => removeAnn(i)}>×</button></td>
+                  <td className="cell-actions"><button className="btn danger ghost" onClick={() => removeAnn(i)}>×</button></td>
                 </tr>
               ))}
             </tbody>
           </table>
         </div>
-    
 
-        {unequalStartsEnds && (
-          <p className="warning">⚠ Number of starts and ends are unequal</p>
-        )}
-        {hasOverlap && (
-          <p className="warning">⚠ Overlapping clips detected</p>
-        )}
-        {!unequalStartsEnds && !hasOverlap && annotations.length > 0 && (
-          <p className="good">✔ Annotations look consistent</p>
-        )}
+        <div className="status-panel">
+          {unequalStartsEnds && <p className="warn">⚠ Number of starts and ends are unequal.</p>}
+          {hasOverlap && <p className="warn">⚠ Overlapping or inverted clips detected (same FM label).</p>}
+          {!unequalStartsEnds && !hasOverlap && annotations.length > 0 && (
+            <p className="ok">✔ Annotations look consistent for this video.</p>
+          )}
+        </div>
       </div>
     </div>
   );
-};
-
-export default App;
+}
