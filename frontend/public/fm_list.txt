@@ -1,3 +1,5 @@
+1, Bicep reflexes
+2, Tricep reflexes
 3-8, Flexor synergy
 9-11, Extensor synergy
 12, Hand to lumbar spine
